@@ -22,6 +22,13 @@ double lat0=0,lon0=0,gpsX=0,gpsY=0;
 uint32_t lastFixMs=0,lastImuUs=0,lastCameraMs=0,lastPrintMs=0;
 int16_t prevX=-1,prevY=-1;
 
+enum MoveCommand : uint8_t {
+    CMD_STOP = 0,
+    CMD_LEFT = 1,
+    CMD_FORWARD = 2,
+    CMD_RIGHT = 3
+};
+
 static double toDegrees(const char* str,char hemi){
   double raw=atof(str);int deg=(int)(raw/100.0);
   double val=deg+(raw-deg*100.0)/60.0;
@@ -62,31 +69,47 @@ void pollGPS(){
   }
 }
 void pollCamera(){
-  if(Wire.requestFrom((uint8_t)CAMERA_ADDR,(uint8_t)4)!=4){
-    prevX=prevY=-1;return;
+  uint8_t received = Wire.requestFrom((uint8_t)CAMERA_ADDR,(uint8_t)5);
+
+  if (received != 5) {
+      while (Wire.available()) Wire.read();
+      // stopRobot(); Hàm điều khiển dừng
+      delay(50);
+      return;
   }
-  int16_t x=(int16_t)((Wire.read()<<8)|Wire.read());
-  int16_t y=(int16_t)((Wire.read()<<8)|Wire.read());
-  if(x<0||y<0||x>=IMG_WIDTH||y>=IMG_HEIGHT){prevX=prevY=-1;return;}
-  int offX=x-IMG_WIDTH/2,offY=y-IMG_HEIGHT/2;
-  Serial.printf("CAM (%d,%d) center offset (%d,%d): ",x,y,offX,offY);
-  if(abs(offX)<=DEAD_ZONE)Serial.print("CENTER");
-  else{
-    if(offX<-DEAD_ZONE)Serial.print("LEFT ");
-    if(offX>DEAD_ZONE)Serial.print("RIGHT ");
+  uint8_t data[5];
+
+  for (int i = 0; i < 5; i++) {
+        data[i] = Wire.read();
   }
-  if(prevX>=0){
-    int dx=x-prevX,dy=y-prevY;
-    Serial.printf(" | delta=(%d,%d) ",dx,dy);
-    if(abs(dx)<=MOVE_THRESHOLD&&abs(dy)<=MOVE_THRESHOLD)Serial.print("STABLE");
-    else{
-      if(dx<-MOVE_THRESHOLD)Serial.print("MOVING LEFT ");
-      if(dx>MOVE_THRESHOLD)Serial.print("MOVING RIGHT ");
-      if(dy<-MOVE_THRESHOLD)Serial.print("MOVING UP ");
-      if(dy>MOVE_THRESHOLD)Serial.print("MOVING DOWN ");
+
+  int16_t x = (int16_t)(((uint16_t)data[0] << 8) | data[1]);
+  int16_t y = (int16_t)(((uint16_t)data[2] << 8) | data[3]);
+
+  uint8_t command = data[4];
+
+  if (x < 0 || y < 0) {
+    // stopRobot();
+  }
+  else {
+    switch (command) {
+      case CMD_LEFT:
+        // turnLeft();
+        break;
+
+      case CMD_FORWARD:
+        // moveForward();
+        break;
+
+      case CMD_RIGHT:
+        // turnRight();
+        break;
+
+      default:
+        // stopRobot();
+        break;
     }
   }
-  Serial.println();prevX=x;prevY=y;
 }
 void setup(){
   Serial.begin(115200);delay(500);

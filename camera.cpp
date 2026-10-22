@@ -19,6 +19,21 @@ HardwareSerial MotorSerial(2);
 
 volatile int16_t targetX = -1;
 volatile int16_t targetY = -1;
+volatile int8_t data[5] = {0xFF, 0xFF, 0xFF, 0xFF, CMD_STOP};
+
+enum MoveCommand : uint8_t {
+    CMD_STOP = 0,
+    CMD_LEFT = 1,
+    CMD_FORWARD = 2,
+    CMD_RIGHT = 3
+};
+
+uint8_t moveCommand = CMD_STOP;
+
+int lastRegion = 1;
+
+float bestScore = -1.0f;
+int bestRegion = 1;
 
 struct Segment{
     int y;
@@ -333,7 +348,7 @@ int CaculateMotion(int beginX, int endX, int maxY, int minY){
     
   }
   int totalPixel = (maxY - minY + 1) * (endX - beginX);
-  int motionScore = (motionPixel * 100) / totalPixel;
+  int motionScore = motionPixel/ totalPixel;
   return motionScore;
 }
 
@@ -461,16 +476,29 @@ void targetFollow(){
   targetY = object[follow].center_y;
 }
 
+void prepareI2CData(){
+
+  noInterrupts();
+
+  data[0] = (uint8_t)(targetX >> 8);
+  data[1] = (uint8_t)(targetX & 0xFF);
+
+  data[2] = (uint8_t)(targetY >> 8);
+  data[3] = (uint8_t)(targetY & 0xFF);
+
+  data[4] = moveCommand;
+
+  interrupts();
+}
+
 void requestEvent(){
-  uint8_t data[4];
+  uint8_t packet[5];
 
-  data[0] = targetX >> 8;
-  data[1] = targetX & 0xFF;
+  for (int i = 0; i < 5; i++) {
+      packet[i] = data[i];
+  }
 
-  data[2] = targetY >> 8;
-  data[3] = targetY & 0xFF;
-
-  Wire.write(data, 4);
+  Wire.write(packet, 5);
 }
 
 int regionStartX(int r){
@@ -498,14 +526,40 @@ void CaculateRegion(){
         }
       }
     }
-    region[i].edgeDensity = float(edgeCount)/total;
+    region[i].edgeDensity = float(edgeCount)/maxArea;
     region[i].motionDensity = 0;
     for (int objectNum = 0; objectNum < objectCount; objectNum++)
     {
-      region[i].motionDensity += CaculateMotion(x0, x1, object[objectNum].max_y, object[objectNum].min_y); 
+      region[i].motionDensity += CaculateMotion(x0, x1, object[objectNum].max_y, object[objectNum].min_y);
+      if(region[i].motionDensity >= 1.0f) region[i].motionDensity = 1.0f;
     }
     region[i].probability = 0.5 * (1 - (targetX - (x0 + x1 - 1))/2)/FRAME_W + 0.25 * region[i].edgeDensity + region[i].motionDensity * 0.25;
+    float adjustedScore = region[i].probability;
+    if(i != lastRegion) adjustedScore -= 0.05f;
+    if(adjustedScore > bestScore){
+      bestScore = adjustedScore;
+      bestRegion = i;
+    }
+
+    lastRegion = bestRegion;
   }
+
+  switch (bestRegion)
+  {
+  case 0:
+    moveCommand = CMD_LEFT;
+    break;
+  case 1:
+    moveCommand = CMD_FORWARD;
+    break;
+  case 2:
+    moveCommand = CMD_RIGHT;
+    break;
+
+  default:
+    break;
+  }
+
   memcpy(prev_gray, gray, ImageSize);
 }
 
@@ -516,7 +570,8 @@ void loop(){
   edgeMask();
   NoiseRemoved();
   findObject();
-  printObjInfo();
   targetFollow();
   CaculateRegion();
+  prepareI2CData();
+  printObjInfo();
 }
