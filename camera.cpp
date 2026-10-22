@@ -17,10 +17,6 @@
 
 HardwareSerial MotorSerial(2);
 
-volatile int16_t targetX = -1;
-volatile int16_t targetY = -1;
-volatile int8_t data[5] = {0xFF, 0xFF, 0xFF, 0xFF, CMD_STOP};
-
 enum MoveCommand : uint8_t {
     CMD_STOP = 0,
     CMD_LEFT = 1,
@@ -28,6 +24,9 @@ enum MoveCommand : uint8_t {
     CMD_RIGHT = 3
 };
 
+volatile int16_t targetX = -1;
+volatile int16_t targetY = -1;
+volatile int8_t data[5] = {0xFF, 0xFF, 0xFF, 0xFF, CMD_STOP};
 uint8_t moveCommand = CMD_STOP;
 
 int lastRegion = 1;
@@ -260,9 +259,9 @@ bool segmentConnected(int x1, int x2, int x3, int x4)
 
 void dilation3x3(){
   memset(morphBuffer, 0, ImageSize);
-  for (int y = 1; y <= FRAME_H - 1; y++)
+  for (int y = 1; y < FRAME_H - 1; y++)
   {
-    for (int x = 1; x <= FRAME_W - 1; x++)
+    for (int x = 1; x < FRAME_W - 1; x++)
     {
       bool valid = false;
       for (int dy = -1; dy <= 1; dy++)
@@ -336,7 +335,7 @@ int CaculateMotion(int beginX, int endX, int maxY, int minY){
   long totalDiffer = 0;
   for (int y = minY; y <= maxY; y++)
   {
-    for (int x = beginX; x <= endX; x++)
+    for (int x = beginX; x < endX; x++)
     {
       int index = y * FRAME_W + x;
       int differ = abs(gray[index] - prev_gray[index]);
@@ -348,7 +347,7 @@ int CaculateMotion(int beginX, int endX, int maxY, int minY){
     
   }
   int totalPixel = (maxY - minY + 1) * (endX - beginX);
-  int motionScore = motionPixel/ totalPixel;
+  float motionScore = motionPixel/ totalPixel;
   return motionScore;
 }
 
@@ -509,6 +508,8 @@ int regionEndX(int r){
 }
 
 void CaculateRegion(){
+  float bestScore = -1000.0f;
+  int candidateRegion = lastRegion;
   for (int i = 0; i < 3; i++)
   {
     int x0 = regionStartX(i);
@@ -518,7 +519,7 @@ void CaculateRegion(){
     int total = (x1-x0)*FRAME_H;
     for (int j = 0; j < FRAME_H; j++)
     {
-      for (int k = x0; x0 < x1; k++)
+      for (int k = x0; k < x1; k++)
       {
         int idx = j * FRAME_W + k;
         if(mask[idx] == 1){
@@ -538,9 +539,9 @@ void CaculateRegion(){
     if(i != lastRegion) adjustedScore -= 0.05f;
     if(adjustedScore > bestScore){
       bestScore = adjustedScore;
-      bestRegion = i;
+      candidateRegion = i;
     }
-
+    bestRegion = candidateRegion;
     lastRegion = bestRegion;
   }
 
@@ -559,19 +560,24 @@ void CaculateRegion(){
   default:
     break;
   }
-
-  memcpy(prev_gray, gray, ImageSize);
 }
 
 void loop(){
+  static bool hasPreviousFrame = false;
   unsigned long startTime = millis();
   camera_fb_t *fb = esp_camera_fb_get();
   grayFilterd(fb);
+  esp_camera_fb_return(fb);
+  if (!hasPreviousFrame) {
+    memcpy(prev_gray, gray, ImageSize);
+    hasPreviousFrame = true;
+  }
   edgeMask();
   NoiseRemoved();
   findObject();
   targetFollow();
   CaculateRegion();
   prepareI2CData();
+  memcpy(prev_gray, gray, ImageSize);
   printObjInfo();
 }
