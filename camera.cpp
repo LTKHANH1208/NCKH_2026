@@ -26,7 +26,7 @@ enum MoveCommand : uint8_t {
 
 volatile int16_t targetX = -1;
 volatile int16_t targetY = -1;
-volatile int8_t data[5] = {0xFF, 0xFF, 0xFF, 0xFF, CMD_STOP};
+volatile uint8_t data[5] = {0xFF, 0xFF, 0xFF, 0xFF, CMD_STOP};
 uint8_t moveCommand = CMD_STOP;
 
 int lastRegion = 1;
@@ -75,6 +75,9 @@ struct Object{
 };
 
 Component component[Maxcomponent];
+int parent[Maxcomponent];
+int nextLabel = 0;
+
 Object object[maxObject];
 RegionInfo region[3];
 int trackID = 1;
@@ -87,9 +90,7 @@ uint8_t *prev_gray = nullptr;
 void setup() {
   Serial.begin(115200);
 
-  // MotorSerial.begin(115200, SERIAL_8N1, 14, 15);
-
-  Wire.begin(myAdress);
+  Wire.begin((uint8_t)0x42, 13, 14, 100000);
 
   Wire.onRequest(requestEvent);
 
@@ -154,46 +155,47 @@ void grayFilterd(camera_fb_t *fb){
   }
 }
 
-void resetComponents()
-{
-  for (int i = 0; i < Maxcomponent; i++)
-  {
-    component[i].used = false;
 
-    component[i].area = 0;
+void resetComponents() {
+  nextLabel = 0;
 
-    component[i].sumX = 0;
-    component[i].sumY = 0;
+  for (int i = 0; i < Maxcomponent; i++) {
+      parent[i] = i;
 
-    component[i].minX = FRAME_W;
-    component[i].maxX = 0;
+      component[i].used = false;
+      component[i].area = 0;
+      component[i].sumX = 0;
+      component[i].sumY = 0;
 
-    component[i].minY = FRAME_H;
+      component[i].minX = FRAME_W;
+      component[i].maxX = 0;
+      component[i].minY = FRAME_H;
     component[i].maxY = 0;
   }
 }
 
-int createComponent(int xStart, int xEnd, int y)
-{
-  for (int i = 0; i < Maxcomponent; i++)
-  {
-    if (!component[i].used)
-    {
-      component[i].used = true;
-      int length = xEnd - xStart + 1;
-      component[i].area = length;
-      component[i].sumX = ((long)xStart + xEnd) * length / 2;
-      component[i].sumY = (long)y * length;
-      component[i].minX = xStart;
-      component[i].maxX = xEnd;
-      component[i].minY = y;
-      component[i].maxY = y;
+int createComponent(int xStart, int xEnd, int y) {
+  if (nextLabel >= Maxcomponent)
+    return -1;
 
-      return i;
-    }
-  }
-  return -1;
+  int label = nextLabel++;
+  parent[label] = label;
+
+  int length = xEnd - xStart + 1;
+
+  component[label].used = true;
+  component[label].area = length;
+  component[label].sumX = ((long)xStart + xEnd) * length / 2;
+  component[label].sumY = (long)y * length;
+
+  component[label].minX = xStart;
+  component[label].maxX = xEnd;
+  component[label].minY = y;
+  component[label].maxY = y;
+
+  return label;
 }
+
 
 void addSegmentToComponent(int label, int xStart, int xEnd, int y)
 {
@@ -225,6 +227,48 @@ void addSegmentToComponent(int label, int xStart, int xEnd, int y)
     component[label].maxY = y;
   }
 }
+
+
+int findRoot(int label) {
+  if (label < 0 || label >= nextLabel)
+    return -1;
+
+  if (parent[label] != label) {
+    parent[label] = findRoot(parent[label]);
+  }
+
+  return parent[label];
+}
+
+int unionLabels(int a, int b) {
+  a = findRoot(a);
+  b = findRoot(b);
+
+  if (a < 0) return b;
+  if (b < 0) return a;
+  if (a == b) return a;
+  
+  if (component[a].area < component[b].area) {
+    int temp = a;
+    a = b;
+    b = temp;
+  }
+
+  parent[b] = a;
+
+  component[a].area += component[b].area;
+  component[a].sumX += component[b].sumX;
+  component[a].sumY += component[b].sumY;
+
+  component[a].minX = min(component[a].minX, component[b].minX);
+  component[a].maxX = max(component[a].maxX, component[b].maxX);
+  component[a].minY = min(component[a].minY, component[b].minY);
+  component[a].maxY = max(component[a].maxY, component[b].maxY);
+  component[b].used = false;
+
+  return a;
+}
+
 
 void edgeMask(){
   memset(mask, 0, ImageSize);
@@ -264,7 +308,7 @@ void dilation3x3(){
     for (int x = 1; x < FRAME_W - 1; x++)
     {
       bool valid = false;
-      for (int dy = -1; dy <= 1; dy++)
+      for (int dy = -1; dy <= 1 && !valid; dy++)
       {
         for (int dx = -1; dx <= 1; dx++)
         {
@@ -273,7 +317,6 @@ void dilation3x3(){
             valid = true;
             break;
           }
-          if(!valid) break;
         }
       }
       if(valid){
@@ -328,8 +371,17 @@ void NoiseRemoved(){
   Closing3x3();
 }
 
-int CaculateMotion(int beginX, int endX, int maxY, int minY){
-  int motionPixel = 0;
+float CaculateMotion(int beginX, int endX, int maxY, int minY){
+  beginX = constrain(beginX, 0, FRAME_W);
+  endX = constrain(endX, 0, FRAME_W);
+
+  minY = constrain(minY, 0, FRAME_H - 1);
+  maxY = constrain(maxY, 0, FRAME_H - 1);
+
+  if (endX <= beginX || maxY < minY) {
+    return 0.0f;
+  }
+  float motionPixel = 0;
   int width = beginX - beginX + 1;
   int height = maxY - minY + 1;
   long totalDiffer = 0;
@@ -346,99 +398,137 @@ int CaculateMotion(int beginX, int endX, int maxY, int minY){
     }
     
   }
-  int totalPixel = (maxY - minY + 1) * (endX - beginX);
+  float totalPixel = (maxY - minY + 1) * (endX - beginX);
   float motionScore = motionPixel/ totalPixel;
   return motionScore;
 }
 
-void findObject(){
 
+void findObject() {
   objectCount = 0;
-
   resetComponents();
+
   static Segment previousSegments[100];
   static Segment currentSegments[100];
 
   int previousCount = 0;
 
-  for (int y = 0; y < FRAME_H - 1; y++)
-  {
-    int x = 0;
+  for (int y = 0; y < FRAME_H; y++) {
+
     int currentCount = 0;
-       
-    while (x < FRAME_W)
-    {
-      while (x < FRAME_W && mask[y * FRAME_W + x] == 0)
-      {
+    int x = 0;
+
+    while (x < FRAME_W) {
+      while (x < FRAME_W && mask[y * FRAME_W + x] == 0) {
         x++;
       }
-      if(x >= FRAME_W) break;
-      
+
+      if (x >= FRAME_W)
+        break;
+
       int startX = x;
-      while (x < FRAME_W && mask[y * FRAME_W + x] != 0)
-      {
+
+      while (x < FRAME_W && mask[y * FRAME_W + x] != 0) {
         x++;
       }
+
       int endX = x - 1;
-      if(currentCount >= 100) break;
-      currentSegments[currentCount].y = y;
-      currentSegments[currentCount].x_start = startX;
-      currentSegments[currentCount].x_end = endX;
-      currentSegments[currentCount].label = -1;
+
+      if (currentCount >= 100)
+        break;
+
+      Segment &seg = currentSegments[currentCount];
+
+      seg.y = y;
+      seg.x_start = startX;
+      seg.x_end = endX;
+      seg.label = -1;
+
       currentCount++;
     }
 
-    for (int c = 0; c < currentCount; c++)
-    {
+    for (int c = 0; c < currentCount; c++) {
+      Segment &seg = currentSegments[c];
+
       int label = -1;
-      for (int p = 0; p < previousCount; p++)
-      {
-        if(segmentConnected(previousSegments[p].x_start, previousSegments[p].x_end, currentSegments[c].x_start, currentSegments[c].x_end)){
-          label = previousSegments[p].label;
-          break;
+
+      for (int p = 0; p < previousCount; p++) {
+
+        Segment &prev = previousSegments[p];
+
+        if (!segmentConnected(prev.x_start, prev.x_end, seg.x_start, seg.x_end)) {
+          continue;
+        }
+
+        int prevRoot = findRoot(prev.label);
+
+        if (prevRoot < 0) continue;
+        if (label == -1) {
+          label = prevRoot;
+        }
+        else {
+          label = unionLabels(label, prevRoot);
         }
       }
-      if(label == -1){
-        label = createComponent(currentSegments[c].x_start, currentSegments[c].x_end, y);
+
+      if (label == -1) {
+        label = createComponent(seg.x_start, seg.x_end, y);
       }
-      else{
-        addSegmentToComponent(label, currentSegments[c].x_start, currentSegments[c].x_end, y);
+      else {
+        label = findRoot(label);
+
+        addSegmentToComponent(label, seg.x_start, seg.x_end, y);
       }
 
-      currentSegments[c].label = label;
+      seg.label = label;
     }
-
     previousCount = currentCount;
-    for (int i = 0; i < currentCount; i++){
-      previousSegments[i] =
-      currentSegments[i];
+
+    for (int i = 0; i < currentCount; i++) {
+      previousSegments[i] = currentSegments[i];
     }
   }
-  for (int i = 0; i < Maxcomponent; i++){
-    if(!component[i].used) continue;
+
+  for (int i = 0; i < nextLabel; i++) {
+
+    if (findRoot(i) != i)
+      continue;
+
+    if (!component[i].used)
+      continue;
+
     int area = component[i].area;
-    if(area < minArea) continue;
-    if(area > maxArea) continue;
-    if(objectCount >= maxObject) break;
+
+    if (area < minArea || area > maxArea)
+      continue;
+
+    if (objectCount >= maxObject)
+      break;
 
     Object &obj = object[objectCount];
+
     obj.area = area;
+
     obj.center_x = component[i].sumX / area;
     obj.center_y = component[i].sumY / area;
+
     obj.min_x = component[i].minX;
     obj.max_x = component[i].maxX;
     obj.min_y = component[i].minY;
     obj.max_y = component[i].maxY;
+
     obj.width = obj.max_x - obj.min_x + 1;
     obj.height = obj.max_y - obj.min_y + 1;
+
     objectCount++;
   }
 }
+
 void printObjInfo(){
   Serial.println();
   Serial.println("------------------------------");
   Serial.print("Object count: ");
-  Serial1.println(objectCount);
+  Serial.println(objectCount);
   for (int i = 0; i < objectCount; i++)
   {
     Serial.print("Object ");
@@ -501,13 +591,18 @@ void requestEvent(){
 }
 
 int regionStartX(int r){
-  return r * (FRAME_W/3);
+  return r * FRAME_W / 3;
 }
 int regionEndX(int r){
-  return (r + 1) * (FRAME_W/3);
+  return (r + 1) * FRAME_W / 3;
 }
 
 void CaculateRegion(){
+  if (targetX < 0 || targetX >= FRAME_W){
+    moveCommand = CMD_STOP;
+    bestRegion = -1;
+    return;
+  }
   float bestScore = -1000.0f;
   int candidateRegion = lastRegion;
   for (int i = 0; i < 3; i++)
@@ -516,7 +611,7 @@ void CaculateRegion(){
     int x1 = regionEndX(i);
 
     int edgeCount = 0;
-    int total = (x1-x0)*FRAME_H;
+    float total = (x1-x0)*FRAME_H;
     for (int j = 0; j < FRAME_H; j++)
     {
       for (int k = x0; k < x1; k++)
@@ -527,23 +622,21 @@ void CaculateRegion(){
         }
       }
     }
-    region[i].edgeDensity = float(edgeCount)/maxArea;
+    region[i].edgeDensity = float(edgeCount)/total;
     region[i].motionDensity = 0;
-    for (int objectNum = 0; objectNum < objectCount; objectNum++)
-    {
-      region[i].motionDensity += CaculateMotion(x0, x1, object[objectNum].max_y, object[objectNum].min_y);
-      if(region[i].motionDensity >= 1.0f) region[i].motionDensity = 1.0f;
-    }
-    region[i].probability = 0.5 * (1 - (targetX - (x0 + x1 - 1))/2)/FRAME_W + 0.25 * region[i].edgeDensity + region[i].motionDensity * 0.25;
+    region[i].motionDensity = CaculateMotion(x0, x1,FRAME_H - 1, 0);
+    if(region[i].motionDensity >= 1.0f) region[i].motionDensity = 1.0f;
+    region[i].probability = 0.5 * (1 - fabs(targetX - (x0 + x1 - 1)/2)/FRAME_W) + 0.25 * region[i].edgeDensity + region[i].motionDensity * 0.25;
     float adjustedScore = region[i].probability;
     if(i != lastRegion) adjustedScore -= 0.05f;
     if(adjustedScore > bestScore){
       bestScore = adjustedScore;
       candidateRegion = i;
     }
-    bestRegion = candidateRegion;
-    lastRegion = bestRegion;
   }
+
+  bestRegion = candidateRegion;
+  lastRegion = bestRegion;
 
   switch (bestRegion)
   {
@@ -562,12 +655,38 @@ void CaculateRegion(){
   }
 }
 
-void loop(){
+
+void loop() {
+
   static bool hasPreviousFrame = false;
-  unsigned long startTime = millis();
+
   camera_fb_t *fb = esp_camera_fb_get();
+
+  if (fb == nullptr) {
+      targetX = -1;
+      targetY = -1;
+      moveCommand = CMD_STOP;
+      prepareI2CData();
+      hasPreviousFrame = false;
+      delay(20);
+      return;
+  }
+
+  if (fb->width != FRAME_W || fb->height != FRAME_H || fb->format != PIXFORMAT_RGB565 || fb->len < ImageSize * 2) {
+    esp_camera_fb_return(fb);
+
+    targetX = -1;
+    targetY = -1;
+    moveCommand = CMD_STOP;
+    prepareI2CData();
+    hasPreviousFrame = false;
+    delay(20);
+    return;
+  }
+
   grayFilterd(fb);
   esp_camera_fb_return(fb);
+
   if (!hasPreviousFrame) {
     memcpy(prev_gray, gray, ImageSize);
     hasPreviousFrame = true;
@@ -580,4 +699,5 @@ void loop(){
   prepareI2CData();
   memcpy(prev_gray, gray, ImageSize);
   printObjInfo();
+  delay(10);
 }
