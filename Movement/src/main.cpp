@@ -44,7 +44,6 @@ enum MoveCommand : uint8_t {
 struct MotorPins {
   uint8_t rpwm;
   uint8_t lpwm;
-  uint8_t enable;
 };
 
 const MotorPins motor1 = {RPWM_1, LPWM_1};
@@ -81,7 +80,6 @@ static bool attachPWM(uint8_t pin, uint8_t channel) {
 static void stopOneMotor(const MotorPins& m) {
   writePWM(m.rpwm, 0);
   writePWM(m.lpwm, 0);
-  digitalWrite(m.enable, LOW); // disable outputs, motor coasts
 }
 
 static void stopMotors() {
@@ -98,7 +96,6 @@ static void setMotor(const MotorPins& m, int16_t speed) {
   stopOneMotor(m);
   if (speed == 0) return;
 
-  digitalWrite(m.enable, HIGH);
   if (speed > 0) writePWM(m.rpwm, (uint8_t)speed);
   else           writePWM(m.lpwm, (uint8_t)(-speed));
 }
@@ -151,6 +148,11 @@ static void applyCameraCommand(uint8_t command) {
   if (!cameraEnabled || testRunning) return;
   if (command > CMD_RIGHT) command = CMD_STOP;
   if (command == lastAppliedCameraCommand) return;
+  if (command == CMD_STOP) {
+    stopMotors();
+    lastAppliedCameraCommand = CMD_STOP;
+    return;
+  }
 
   // Stop both motors before any change of direction/movement.
   stopMotors();
